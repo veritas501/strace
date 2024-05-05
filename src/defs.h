@@ -328,7 +328,7 @@ struct tcb {
 	struct unwind_queue_t *unwind_queue;
 # endif
 
-# define PROC_COMM_LEN 16
+# define PROC_COMM_LEN 1024
 	char comm[PROC_COMM_LEN];
 };
 

@@ -95,6 +95,7 @@ static bool rflag;
 static int rflag_scale = 1000;
 static int rflag_width = 6;
 static bool print_pid_pfx;
+static const char *filter_exe_name = NULL;
 
 static unsigned int version_verbosity;
 
@@ -335,6 +336,7 @@ Tracing:\n\
      4, never_tstp: fatal signals and SIGTSTP (^Z) are always blocked\n\
                     (useful to make 'strace -o FILE PROG' not stop on ^Z)\n\
   --kill-on-exit kill all tracees if strace is killed\n\
+  --filter-exe-name filter trace process with exe name\n\
 \n\
 Filtering:\n\
   -e trace=[!][?]{{SYSCALL|GROUP|all|/REGEX}[@64|@32|@x32]|none},\n\
@@ -1022,11 +1024,34 @@ load_pid_comm(int pid, char *buf, size_t buf_size)
 	}
 }
 
+static void load_pid_exe(int pid, char *buf, size_t buf_size) {
+	char exe_link[1024];
+	char exe_path[1024];
+	int bytes;
+
+	snprintf(exe_link, sizeof(exe_link), "/proc/%d/exe", pid);
+	buf[0] = '\0';
+
+	bytes = readlink(exe_link, exe_path, sizeof(exe_path) - 1);
+	if (bytes == -1) {
+		return;
+	}
+
+	exe_path[bytes] = '\0';
+
+	char *last_slash = strrchr(exe_path, '/');
+	if (last_slash != NULL) {
+		snprintf(buf, buf_size, "%s", last_slash + 1);
+	} else {
+		snprintf(buf, buf_size, "%s", exe_path);
+	}
+}
+
 void
 print_pid_comm(int pid)
 {
 	char buf[PROC_COMM_LEN];
-	load_pid_comm(pid, buf, sizeof(buf));
+	load_pid_exe(pid, buf, sizeof(buf));
 	print_comm_str(buf, strlen(buf));
 }
 
@@ -1036,7 +1061,7 @@ maybe_load_task_comm(struct tcb *tcp)
 	if (!is_number_in_set(DECODE_PID_COMM, decode_pid_set))
 		return;
 
-	load_pid_comm(get_proc_pid(tcp->pid), tcp->comm, sizeof(tcp->comm));
+	load_pid_exe(get_proc_pid(tcp->pid), tcp->comm, sizeof(tcp->comm));
 }
 
 static struct tcb *
@@ -2379,6 +2404,7 @@ init(int argc, char *argv[])
 		GETOPT_QUAL_DECODE_FD,
 		GETOPT_QUAL_DECODE_PID,
 		GETOPT_QUAL_SECONTEXT,
+		GETOPT_QUAL_FILTER_EXE_NAME,
 	};
 	static const struct option longopts[] = {
 		{ "columns",		required_argument, 0, 'a' },
@@ -2446,6 +2472,8 @@ init(int argc, char *argv[])
 		{ "decode-fds",	optional_argument, 0, GETOPT_QUAL_DECODE_FD },
 		{ "decode-pids",required_argument, 0, GETOPT_QUAL_DECODE_PID },
 		{ "secontext",	optional_argument, 0, GETOPT_QUAL_SECONTEXT },
+
+		{"filter-exe-name", required_argument, 0, GETOPT_QUAL_FILTER_EXE_NAME},
 
 		{ 0, 0, 0, 0 }
 	};
@@ -2769,6 +2797,10 @@ init(int argc, char *argv[])
 			break;
 		case GETOPT_QUAL_DECODE_PID:
 			qualify_decode_pid(optarg);
+			break;
+		case GETOPT_QUAL_FILTER_EXE_NAME:
+			error_msg("set filter_exe_name = %s", optarg);
+			filter_exe_name = optarg;
 			break;
 		default:
 			error_msg_and_help(NULL);
@@ -3348,6 +3380,16 @@ maybe_allocate_tcb(const int pid, int status)
 	if (followfork) {
 		/* We assume it's a fork/vfork/clone child */
 		struct tcb *tcp = alloctcb(pid);
+
+		if (filter_exe_name && strcmp(filter_exe_name, tcp->comm)) {
+			if (!is_number_in_set(QUIET_ATTACH, quiet_set))
+				error_msg("Kill unrelated process %s", tcp->comm);
+			ptrace(PTRACE_DETACH, pid, NULL, 0L);
+			if (!is_number_in_set(QUIET_ATTACH, quiet_set))
+				error_msg("Detached unrelated pid %d", pid);
+			return NULL;
+		}
+
 		after_successful_attach(tcp, post_attach_sigstop);
 		if (!is_number_in_set(QUIET_ATTACH, quiet_set))
 			error_msg("Process %d attached", pid);
@@ -3767,6 +3809,15 @@ next_event(void)
 			tcp = maybe_allocate_tcb(pid, status);
 			if (!tcp)
 				goto next_event_wait_next;
+		}
+
+		if(filter_exe_name && strcmp(filter_exe_name, tcp->comm)){
+			if (!is_number_in_set(QUIET_ATTACH, quiet_set))
+				error_msg("Kill unrelated process %s",tcp->comm);
+			ptrace(PTRACE_DETACH, pid, NULL, 0L);
+			if (!is_number_in_set(QUIET_ATTACH, quiet_set))
+				error_msg("Detached unrelated pid %d", pid);
+			goto next_event_wait_next;
 		}
 
 		if (cflag) {
